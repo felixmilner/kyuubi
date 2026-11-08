@@ -126,7 +126,7 @@ class ExecuteStatement(
       if (!abandoned) {
         val reader = result.getReader
         val root = reader.getVectorSchemaRoot
-        schema = AdbcSchema.columns(root.getSchema)
+        schema = AdbcSchema.columns(root.getSchema, reader)
         if (useArrow) {
           native {
             if (!abandoned) {

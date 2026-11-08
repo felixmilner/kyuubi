@@ -22,9 +22,11 @@ import java.util.{ArrayList => JArrayList, Collections}
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.vector.{BaseIntVector, FieldVector}
+import org.apache.arrow.vector.dictionary.DictionaryProvider
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, Schema}
 
+import org.apache.kyuubi.KyuubiSQLException
 import org.apache.kyuubi.engine.result.TRowSetGenerator
 import org.apache.kyuubi.shaded.hive.service.rpc.thrift._
 import org.apache.kyuubi.util.RowSetUtils.formatLocalDateTime
@@ -42,7 +44,16 @@ case class AdbcColumn(
 
 object AdbcSchema {
 
-  def columns(schema: Schema): List[AdbcColumn] = schema.getFields.asScala.map(column).toList
+  /**
+   * `dictionaries` is the reader the batches come from: a dictionary-encoded column (DuckDB sends
+   * every ENUM that way) holds indices, and the values live in the reader's dictionary, which is
+   * looked up on each read because a later batch can carry a new one.
+   */
+  def columns(schema: Schema, dictionaries: DictionaryProvider): List[AdbcColumn] =
+    schema.getFields.asScala.map(f => column(f, dictionaries)).toList
+
+  def columns(schema: Schema): List[AdbcColumn] =
+    columns(schema, new DictionaryProvider.MapDictionaryProvider())
 
   private def nullSafe(f: (FieldVector, Int) => Any): (FieldVector, Int) => Any =
     (v, i) => if (v.isNull(i)) null else f(v, i)
@@ -52,11 +63,26 @@ object AdbcSchema {
   /** Strings render the object's own text form; used for types without a Thrift column of their own. */
   private val asText: (FieldVector, Int) => Any = nullSafe((v, i) => String.valueOf(v.getObject(i)))
 
-  def column(field: Field): AdbcColumn = {
+  def column(field: Field): AdbcColumn =
+    column(field, new DictionaryProvider.MapDictionaryProvider())
+
+  def column(field: Field, dictionaries: DictionaryProvider): AdbcColumn = {
     val name = field.getName
     def col(id: TTypeId, read: (FieldVector, Int) => Any, p: Int = 0, s: Int = 0): AdbcColumn =
       AdbcColumn(name, id, p, s, read)
-    field.getType match {
+    if (field.getDictionary != null) {
+      // the field's own type is the index type; the client gets the dictionary's values as text
+      val dictionaryId = field.getDictionary.getId
+      col(TTypeId.STRING_TYPE, nullSafe { (v, i) =>
+        val dictionary = dictionaries.lookup(dictionaryId)
+        if (dictionary == null) {
+          throw KyuubiSQLException(
+            s"Column $name is dictionary-encoded but the reader has no dictionary $dictionaryId")
+        }
+        String.valueOf(dictionary.getVector.getObject(
+          v.asInstanceOf[BaseIntVector].getValueAsLong(i).toInt))
+      })
+    } else field.getType match {
       case _: ArrowType.Bool =>
         col(TTypeId.BOOLEAN_TYPE, nullSafe((v, i) => java.lang.Boolean.valueOf(v.getObject(i).toString.toBoolean)))
       case t: ArrowType.Int =>

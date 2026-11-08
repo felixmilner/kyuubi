@@ -26,10 +26,11 @@ import scala.collection.JavaConverters._
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
 import org.apache.arrow.vector.ipc.ReadChannel
 import org.apache.arrow.vector.ipc.message.MessageSerializer
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
-import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, Field, FieldType, Schema}
 
 import org.apache.kyuubi.KyuubiFunSuite
 import org.apache.kyuubi.jdbc.hive.{JdbcColumnAttributes, KyuubiArrowQueryResultSet}
@@ -83,7 +84,24 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
       "list_i32",
       new FieldType(true, ArrowType.List.INSTANCE, null),
       java.util.Arrays.asList(field("item", signed(32)))),
+    // what DuckDB sends for an ENUM: indices, with the labels in the reader's dictionary 0
+    new Field(
+      "enum_col",
+      new FieldType(true, unsigned(8), new DictionaryEncoding(0L, false, unsigned(8))),
+      java.util.Collections.emptyList[Field]()),
     field("null_col", ArrowType.Null.INSTANCE))
+
+  private val EnumLabels = Seq("red", "green", "blue")
+
+  /** The reader's dictionary for `enum_col`; the caller closes the provider. */
+  private def enumDictionary(allocator: BufferAllocator): DictionaryProvider.MapDictionaryProvider = {
+    val labels = new VarCharVector("enum_labels", allocator)
+    labels.allocateNew()
+    EnumLabels.zipWithIndex.foreach { case (l, i) => labels.setSafe(i, l.getBytes("UTF-8")) }
+    labels.setValueCount(EnumLabels.size)
+    new DictionaryProvider.MapDictionaryProvider(
+      new Dictionary(labels, new DictionaryEncoding(0L, false, unsigned(8))))
+  }
 
   private def fillSource(root: VectorSchemaRoot): Unit = {
     root.allocateNew()
@@ -111,6 +129,7 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
       vec[TimeStampMilliVector]("ts_ms").setSafe(i, 1700000000123L + i)
       vec[TimeStampNanoVector]("ts_ns").setSafe(i, 1700000000123456789L + i)
       vec[TimeMicroVector]("time_us").setSafe(i, 3600000000L + i)
+      vec[UInt1Vector]("enum_col").setSafe(i, i % EnumLabels.size)
       val list = vec[ListVector]("list_i32")
       val writer = list.getWriter
       writer.setPosition(i)
@@ -150,7 +169,8 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
       val source = VectorSchemaRoot.create(new Schema(sourceFields.asJava), allocator)
       try {
         fillSource(source)
-        val columns = AdbcSchema.columns(source.getSchema)
+        val dictionaries = enumDictionary(allocator)
+        val columns = AdbcSchema.columns(source.getSchema, dictionaries)
         val encoder = new AdbcArrowEncoder(
           columns,
           source.getSchema,
@@ -186,6 +206,12 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
               val isNull = row.isNullAt(j)
               assert(isNull === (expected == null), s"null mismatch in ${c.name} row $rowIndex")
               if (!isNull) {
+                if (c.name == "enum_col") {
+                  // not only "same as the row path": both paths once returned the index
+                  val label = EnumLabels(rowIndex % EnumLabels.size)
+                  assert(expected === label, s"row path enum row $rowIndex")
+                  assert(row.get(j, ids(j), null, timestampAsString) === label, s"arrow enum row $rowIndex")
+                }
                 val attr = attrs(j)
                 val actual = row.get(j, ids(j), if (attr == null) null else attr.timeZone,
                   timestampAsString)
@@ -198,6 +224,7 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
         }
         assert(rowIndex === Rows)
         failed = false
+        dictionaries.close()
       } finally source.close()
     } finally {
       // a leak report after a failed assertion would only hide that assertion
@@ -232,6 +259,32 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
     checkRoundTrip(timestampAsString = true, maxRows = 1)
   }
 
+  test("wide rows are sliced by size, not only by row count") {
+    val allocator: BufferAllocator = new RootAllocator(Long.MaxValue)
+    val schema = new Schema(java.util.Arrays.asList(field("big", ArrowType.Utf8.INSTANCE)))
+    val source = VectorSchemaRoot.create(schema, allocator)
+    try {
+      source.allocateNew()
+      val v = source.getVector("big").asInstanceOf[VarCharVector]
+      val value = ("x" * 1000).getBytes("UTF-8")
+      (0 until 100).foreach(i => v.setSafe(i, value))
+      v.setValueCount(100)
+      source.setRowCount(100)
+      val columns = AdbcSchema.columns(schema)
+      def batches(maxBytes: Long): Int = {
+        val e = new AdbcArrowEncoder(columns, schema, false, allocator, 8192, maxBytes)
+        try e.encode(source).size
+        finally e.close()
+      }
+      assert(batches(Long.MaxValue) === 1) // the row cap alone would send all 100 rows at once
+      assert(batches(10000) > 5) // about 1 KB a row: roughly 10 rows per batch
+      assert(batches(1) === 100) // a row cannot be split: one row per batch, none dropped
+    } finally {
+      source.close()
+      allocator.close()
+    }
+  }
+
   test("types the client cannot decode are advertised and sent as text") {
     val columns = AdbcSchema.columns(new Schema(sourceFields.asJava))
     val byName = columns.map(c => c.name -> c.tTypeId).toMap
@@ -245,6 +298,21 @@ class AdbcArrowEncoderSuite extends KyuubiFunSuite {
     assert(byName("list_i32") === TTypeId.STRING_TYPE)
     assert(byName("binary") === TTypeId.STRING_TYPE)
     assert(byName("null_col") === TTypeId.STRING_TYPE)
+    assert(byName("enum_col") === TTypeId.STRING_TYPE)
+  }
+
+  test("a dictionary-encoded column with no dictionary fails with a clear error") {
+    val allocator: BufferAllocator = new RootAllocator(Long.MaxValue)
+    val source = VectorSchemaRoot.create(new Schema(sourceFields.asJava), allocator)
+    try {
+      fillSource(source)
+      val c = AdbcSchema.columns(source.getSchema).find(_.name == "enum_col").get
+      val e = intercept[org.apache.kyuubi.KyuubiSQLException](c.read(source.getVector("enum_col"), 0))
+      assert(e.getMessage.contains("dictionary"))
+    } finally {
+      source.close()
+      allocator.close()
+    }
   }
 
   test("timestamp columns carry the session time zone for the client") {

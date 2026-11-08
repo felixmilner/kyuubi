@@ -22,6 +22,8 @@ import java.nio.channels.Channels
 import java.nio.charset.StandardCharsets
 import java.util.{ArrayList => JArrayList}
 
+import scala.collection.JavaConverters._
+
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.ipc.{ArrowStreamWriter, WriteChannel}
@@ -92,11 +94,13 @@ class AdbcArrowEncoder(
     sourceSchema: Schema,
     timestampAsString: Boolean,
     allocator: BufferAllocator,
-    maxRowsPerBatch: Int) extends AutoCloseable {
+    maxRowsPerBatch: Int,
+    maxBytesPerBatch: Long = AdbcArrowEncoder.DefaultMaxBytesPerBatch) extends AutoCloseable {
 
   import AdbcArrowEncoder._
 
   require(maxRowsPerBatch > 0, "maxRowsPerBatch must be positive")
+  require(maxBytesPerBatch > 0, "maxBytesPerBatch must be positive")
   require(columns.size == sourceSchema.getFields.size, "column count does not match the schema")
 
   val targetSchema: Schema = AdbcArrowTypes.clientSchema(columns, timestampAsString)
@@ -107,14 +111,22 @@ class AdbcArrowEncoder(
       writer(c, f.getType, timestampAsString)
     }.toArray
 
-  /** Serialized batches of at most `maxRowsPerBatch` rows for everything `source` holds now. */
+  /**
+   * Serialized batches for everything `source` holds now, each of at most `maxRowsPerBatch` rows
+   * and, judged by the source's average bytes per row, about `maxBytesPerBatch` bytes (a Thrift
+   * message has a size limit, 100 MB by default). A single row larger than the limit still goes
+   * out alone: a row cannot be split.
+   */
   def encode(source: VectorSchemaRoot): Seq[Array[Byte]] = {
     val rows = source.getRowCount
     val vectors = source.getFieldVectors
     val out = Vector.newBuilder[Array[Byte]]
+    val sourceBytes = vectors.asScala.map(_.getBufferSize.toLong).sum
+    val bytesPerRow = math.max(1L, sourceBytes / math.max(1, rows))
+    val rowsPerBatch = math.max(1L, math.min(maxRowsPerBatch.toLong, maxBytesPerBatch / bytesPerRow)).toInt
     var from = 0
     while (from < rows) {
-      val count = math.min(maxRowsPerBatch, rows - from)
+      val count = math.min(rowsPerBatch, rows - from)
       target.clear()
       target.allocateNew()
       var j = 0
@@ -141,6 +153,9 @@ class AdbcArrowEncoder(
 }
 
 object AdbcArrowEncoder {
+
+  /** Half-way between "small enough to stream" and the Thrift default message limit of 100 MB. */
+  val DefaultMaxBytesPerBatch: Long = 16L * 1024 * 1024
 
   /** Copies (and converts) one non-null value: source vector, target vector, source row, target row. */
   private type Writer = (FieldVector, FieldVector, Int, Int) => Unit
