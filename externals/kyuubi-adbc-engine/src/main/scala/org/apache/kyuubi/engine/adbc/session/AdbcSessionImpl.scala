@@ -17,7 +17,7 @@
 package org.apache.kyuubi.engine.adbc.session
 
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.util.concurrent.locks.{ReentrantLock, ReentrantReadWriteLock}
 
 import scala.util.control.NonFatal
 
@@ -83,6 +83,28 @@ class AdbcSessionImpl(
     nativeGate.readLock().lock()
     try body
     finally nativeGate.readLock().unlock()
+  }
+
+  // One metadata call at a time: it reads and closes its result before the next starts, so a driver
+  // that allows one open result per connection is never asked for a second.
+  private val metadataLock = new ReentrantLock()
+
+  private[adbc] def withMetadataConnection[T](body: AdbcConnection => T): T = {
+    metadataLock.lock()
+    try {
+      withNativeAccess {
+        val connection = metadataConnection
+        if (connection == null) throw KyuubiSQLException("The session is closed")
+        body(connection)
+      }
+    } finally metadataLock.unlock()
+  }
+
+  /** For connection state (current catalog and schema), which lives on the query connection. */
+  private[adbc] def withQueryConnection[T](body: AdbcConnection => T): T = withNativeAccess {
+    val connection = queryConnection
+    if (connection == null) throw KyuubiSQLException("The session is closed")
+    body(connection)
   }
 
   override def open(): Unit = {

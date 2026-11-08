@@ -25,8 +25,9 @@ import org.apache.kyuubi.operation.{Operation, OperationManager}
 import org.apache.kyuubi.session.Session
 
 /**
- * M1 runs statements only. The metadata operations (catalogs, schemas, tables, columns, ...) are
- * added in M2 on top of the driver's getObjects / getTableSchema.
+ * Statements, and the metadata operations built on the driver's getObjects / getTableSchema
+ * (catalogs, schemas, tables, table types, columns, current catalog and schema). GetTypeInfo,
+ * GetFunctions, GetPrimaryKeys and GetCrossReference still refuse.
  */
 class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
 
@@ -63,28 +64,28 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
     throw KyuubiSQLException.featureNotSupported(s"$what is not supported by the ADBC engine yet")
 
   override def newSetCurrentCatalogOperation(session: Session, catalog: String): Operation =
-    notSupported("Setting the current catalog")
+    addOperation(new SetCurrentCatalog(session, catalog))
 
   override def newGetCurrentCatalogOperation(session: Session): Operation =
-    notSupported("Getting the current catalog")
+    addOperation(new GetCurrentCatalog(session))
 
   override def newSetCurrentDatabaseOperation(session: Session, database: String): Operation =
-    notSupported("Setting the current database")
+    addOperation(new SetCurrentDatabase(session, database))
 
   override def newGetCurrentDatabaseOperation(session: Session): Operation =
-    notSupported("Getting the current database")
+    addOperation(new GetCurrentDatabase(session))
 
   override def newGetTypeInfoOperation(session: Session): Operation =
     notSupported("GetTypeInfo")
 
   override def newGetCatalogsOperation(session: Session): Operation =
-    notSupported("GetCatalogs")
+    addOperation(new GetCatalogs(session))
 
   override def newGetSchemasOperation(
       session: Session,
       catalog: String,
       schema: String): Operation =
-    notSupported("GetSchemas")
+    addOperation(new GetSchemas(session, catalog, schema))
 
   override def newGetTablesOperation(
       session: Session,
@@ -92,10 +93,10 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
       schemaName: String,
       tableName: String,
       tableTypes: util.List[String]): Operation =
-    notSupported("GetTables")
+    addOperation(new GetTables(session, catalogName, schemaName, tableName, tableTypes))
 
   override def newGetTableTypesOperation(session: Session): Operation =
-    notSupported("GetTableTypes")
+    addOperation(new GetTableTypes(session))
 
   override def newGetColumnsOperation(
       session: Session,
@@ -103,7 +104,7 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
       schemaName: String,
       tableName: String,
       columnName: String): Operation =
-    notSupported("GetColumns")
+    addOperation(new GetColumns(session, catalogName, schemaName, tableName, columnName))
 
   override def newGetFunctionsOperation(
       session: Session,

@@ -225,6 +225,7 @@ object AdbcTRowSetGenerator extends TRowSetGenerator[Seq[AdbcColumn], Seq[Any], 
 
   override def toTColumn(rows: Seq[Seq[Any]], ordinal: Int, typ: TTypeId): TColumn = typ match {
     case TTypeId.BOOLEAN_TYPE => asBooleanTColumn(rows, ordinal)
+    case TTypeId.TINYINT_TYPE => asByteTColumn(rows, ordinal)
     case TTypeId.SMALLINT_TYPE => asShortTColumn(rows, ordinal)
     case TTypeId.INT_TYPE => asIntegerTColumn(rows, ordinal)
     case TTypeId.BIGINT_TYPE => asLongTColumn(rows, ordinal)
@@ -236,6 +237,7 @@ object AdbcTRowSetGenerator extends TRowSetGenerator[Seq[AdbcColumn], Seq[Any], 
   override def toTColumnValue(row: Seq[Any], ordinal: Int, types: Seq[AdbcColumn]): TColumnValue =
     types(ordinal).tTypeId match {
       case TTypeId.BOOLEAN_TYPE => asBooleanTColumnValue(row, ordinal)
+      case TTypeId.TINYINT_TYPE => asByteTColumnValue(row, ordinal)
       case TTypeId.SMALLINT_TYPE => asShortTColumnValue(row, ordinal)
       case TTypeId.INT_TYPE => asIntegerTColumnValue(row, ordinal)
       case TTypeId.BIGINT_TYPE => asLongTColumnValue(row, ordinal)
