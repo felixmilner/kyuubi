@@ -138,8 +138,13 @@ object AdbcSchema {
           case n: java.lang.Number => timeToString(n.longValue, t.getUnit)
           case other => String.valueOf(other)
         }))
+      case _: ArrowType.Interval | _: ArrowType.Duration =>
+        col(TTypeId.STRING_TYPE, nullSafe((v, i) => AdbcValueText.intervalText(v.getObject(i))))
+      case t if AdbcValueText.isNested(t) =>
+        // list, struct, map (and a fixed-size list): JSON text, ENUMs inside it decoded
+        col(TTypeId.STRING_TYPE, nullSafe(AdbcValueText.nested(field, dictionaries)))
       case _ =>
-        // list, struct, map, interval, duration, union, null: the object's text form for now (M2)
+        // union, null and anything else without a Thrift type: the object's text form
         col(TTypeId.STRING_TYPE, asText)
     }
   }
