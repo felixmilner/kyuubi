@@ -279,7 +279,8 @@ abstract class SessionManager(name: String) extends CompositeService(name) {
 
     _confRestrictList = conf.get(SESSION_CONF_RESTRICT_LIST)
     _confIgnoreList = conf.get(SESSION_CONF_IGNORE_LIST) +
-      s"${SESSION_USER_SIGN_ENABLED.key}"
+      s"${SESSION_USER_SIGN_ENABLED.key}" ++
+      (if (isServer) ADBC_ENGINE_LAUNCH_CONF else Set.empty[String])
     _batchConfIgnoreList = conf.get(BATCH_CONF_IGNORE_LIST)
 
     execPool = ThreadUtils.newDaemonQueuedThreadPool(

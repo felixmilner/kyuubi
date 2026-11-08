@@ -4140,6 +4140,24 @@ object KyuubiConf {
       .stringConf
       .createOptional
 
+  /**
+   * ADBC engine launch settings that a client session must never set. The init SQL can use
+   * `${env:NAME}` (the engine inherits the server's environment), the driver and its options decide
+   * what native code the engine loads, and the Java options and classpath decide what JVM it is.
+   * The server ignores these keys in client session conf, like entries in
+   * `kyuubi.session.conf.ignore.list` (a trailing `.*` is a prefix match). Behaviour keys such as
+   * `kyuubi.engine.adbc.operation.incremental.collect` stay settable per session.
+   */
+  val ADBC_ENGINE_LAUNCH_CONF: Set[String] = Set(
+    ENGINE_ADBC_DRIVER.key,
+    ENGINE_ADBC_URI.key,
+    ENGINE_ADBC_INITIALIZE_SQL.key,
+    ENGINE_ADBC_MEMORY.key,
+    ENGINE_ADBC_JAVA_OPTIONS.key,
+    ENGINE_ADBC_EXTRA_CLASSPATH.key,
+    "kyuubi.engine.adbc.option.*",
+    "kyuubi.session.engine.adbc.*")
+
   val ENGINE_SPARK_EVENT_LOGGERS: ConfigEntry[Seq[String]] =
     buildConf("kyuubi.engine.spark.event.loggers")
       .doc("A comma-separated list of engine loggers, where engine/session/operation etc" +

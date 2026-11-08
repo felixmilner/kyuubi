@@ -58,16 +58,19 @@ class ExecuteStatement(
   // the reading thread closes the resources once its read has returned.
   private val nativeLock = new ReentrantLock()
 
+  private def adbcSession: AdbcSessionImpl = session.asInstanceOf[AdbcSessionImpl]
+
+  // the session's gate keeps its connections and database open while this call is in the driver
   private def native[T](body: => T): T = {
     nativeLock.lock()
-    try body
+    try adbcSession.withNativeAccess(body)
     finally nativeLock.unlock()
   }
 
   /** Closes the result and statement now if no thread is reading; otherwise the reader does it. */
   private def closeIfIdle(): Unit = {
     if (nativeLock.tryLock()) {
-      try closeResources()
+      try adbcSession.withNativeAccess(closeResources())
       finally nativeLock.unlock()
     }
   }
