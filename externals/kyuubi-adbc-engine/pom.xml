@@ -82,6 +82,15 @@
             <version>${adbc.arrow.version}</version>
         </dependency>
 
+        <!-- the Arrow rowset is checked against the real client's decoder; Arrow stays at the ADBC
+             version above, so this does not test the client's own Arrow version (see DESIGN.md) -->
+        <dependency>
+            <groupId>org.apache.kyuubi</groupId>
+            <artifactId>kyuubi-hive-jdbc</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.kyuubi</groupId>
             <artifactId>kyuubi-util-scala_${scala.binary.version}</artifactId>

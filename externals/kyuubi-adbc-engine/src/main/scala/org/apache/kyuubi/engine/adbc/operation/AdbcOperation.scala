@@ -17,7 +17,7 @@
 package org.apache.kyuubi.engine.adbc.operation
 
 import org.apache.kyuubi.{KyuubiSQLException, Utils}
-import org.apache.kyuubi.engine.adbc.schema.{AdbcColumn, AdbcSchema, AdbcTRowSetGenerator}
+import org.apache.kyuubi.engine.adbc.schema.{AdbcArrowTRowSet, AdbcColumn, AdbcSchema, AdbcTRowSetGenerator}
 import org.apache.kyuubi.operation.{AbstractOperation, FetchIterator, OperationState}
 import org.apache.kyuubi.operation.FetchOrientation.{FETCH_FIRST, FETCH_NEXT, FETCH_PRIOR, FetchOrientation}
 import org.apache.kyuubi.session.Session
@@ -27,7 +27,15 @@ abstract class AdbcOperation(session: Session) extends AbstractOperation(session
 
   protected var schema: List[AdbcColumn] = _
 
+  // Rows (Thrift result format) or serialized Arrow record batches (Arrow format); only the one
+  // that matches `arrowFormat` is set.
   protected var iter: FetchIterator[Seq[Any]] = _
+  protected var arrowIter: FetchIterator[Array[Byte]] = _
+
+  /** Whether results go out as Arrow record batches, for the kyuubi-hive-jdbc Arrow client. */
+  protected def arrowFormat: Boolean = false
+
+  protected def timestampAsString: Boolean = false
 
   def validateFetchOrientation(order: FetchOrientation): Unit =
     validateDefaultFetchOrientation(order)
@@ -38,17 +46,31 @@ abstract class AdbcOperation(session: Session) extends AbstractOperation(session
     validateFetchOrientation(order)
     assertState(OperationState.FINISHED)
     setHasResultSet(true)
-    order match {
-      case FETCH_NEXT =>
-        iter.fetchNext()
-      case FETCH_PRIOR =>
-        iter.fetchPrior(rowSetSize)
-      case FETCH_FIRST =>
-        iter.fetchAbsolute(0)
+    val resultRowSet = if (arrowFormat) {
+      // one serialized batch per fetch; the row set size does not apply (as in the Spark engine)
+      order match {
+        case FETCH_NEXT => arrowIter.fetchNext()
+        case FETCH_PRIOR => arrowIter.fetchPrior(rowSetSize)
+        case FETCH_FIRST => arrowIter.fetchAbsolute(0)
+      }
+      val rowSet =
+        if (arrowIter.hasNext) AdbcArrowTRowSet(arrowIter.next()) else AdbcArrowTRowSet.empty
+      rowSet.setStartRowOffset(arrowIter.getPosition)
+      rowSet
+    } else {
+      order match {
+        case FETCH_NEXT =>
+          iter.fetchNext()
+        case FETCH_PRIOR =>
+          iter.fetchPrior(rowSetSize)
+        case FETCH_FIRST =>
+          iter.fetchAbsolute(0)
+      }
+      val taken = iter.take(rowSetSize)
+      val rowSet = toTRowSet(taken)
+      rowSet.setStartRowOffset(iter.getPosition)
+      rowSet
     }
-    val taken = iter.take(rowSetSize)
-    val resultRowSet = toTRowSet(taken)
-    resultRowSet.setStartRowOffset(iter.getPosition)
     val resp = new TFetchResultsResp(OK_STATUS)
     resp.setResults(resultRowSet)
     resp.setHasMoreRows(false)
@@ -99,7 +121,10 @@ abstract class AdbcOperation(session: Session) extends AbstractOperation(session
   override def getResultSetMetadata: TGetResultSetMetadataResp = {
     val resp = new TGetResultSetMetadataResp
     resp.setSchema(AdbcSchema.toTTableSchema(schema))
-    resp.setStatus(OK_STATUS)
+    // The JDBC client picks its decoder from these hints, not from what it asked for.
+    resp.setStatus(okStatusWithHints(Seq(
+      s"__kyuubi_operation_result_format__=${if (arrowFormat) "arrow" else "thrift"}",
+      s"__kyuubi_operation_result_arrow_timestampAsString__=$timestampAsString")))
     resp
   }
 

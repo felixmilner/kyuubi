@@ -86,7 +86,8 @@ object AdbcSchema {
         // Rendered as DuckDB renders a BLOB as text (non-printable bytes as \xHH), which is what
         // the existing JDBC-engine path returned to clients.
         col(TTypeId.STRING_TYPE, string((v, i) => blobToString(v.getObject(i).asInstanceOf[Array[Byte]])))
-      case d: ArrowType.Decimal =>
+      case d: ArrowType.Decimal if d.getBitWidth == 128 && d.getPrecision <= 38 =>
+        // the Arrow client only decodes 128-bit decimals; wider ones go as text in both encodings
         col(
           TTypeId.DECIMAL_TYPE,
           string((v, i) => v.getObject(i).asInstanceOf[java.math.BigDecimal].toPlainString),
@@ -97,11 +98,15 @@ object AdbcSchema {
       case _: ArrowType.Date =>
         col(TTypeId.DATE_TYPE, string((v, i) => v.getObject(i).asInstanceOf[LocalDateTime].toLocalDate.toString))
       case t: ArrowType.Timestamp =>
-        col(TTypeId.TIMESTAMP_TYPE, string((v, i) => v.getObject(i) match {
+        val text = string((v, i) => v.getObject(i) match {
           case ldt: LocalDateTime => formatLocalDateTime(ldt)
           case epoch: java.lang.Long => formatLocalDateTime(epochToLocalDateTime(epoch, t.getUnit))
           case other => String.valueOf(other)
-        }))
+        })
+        // The Arrow client only decodes microsecond timestamps, so nanoseconds would lose digits
+        // there but not in rows. Sent as text in both encodings they stay exact and identical.
+        if (t.getUnit == TimeUnit.NANOSECOND) col(TTypeId.STRING_TYPE, text)
+        else col(TTypeId.TIMESTAMP_TYPE, text)
       case t: ArrowType.Time =>
         col(TTypeId.STRING_TYPE, string((v, i) => v.getObject(i) match {
           case n: java.lang.Number => timeToString(n.longValue, t.getUnit)
@@ -151,14 +156,17 @@ object AdbcSchema {
     columns.zipWithIndex.foreach { case (c, pos) =>
       val typeEntry = new TPrimitiveTypeEntry(c.tTypeId)
       val qualifiers = new TTypeQualifiers()
-      qualifiers.setQualifiers(
-        if (c.tTypeId == TTypeId.DECIMAL_TYPE) {
+      qualifiers.setQualifiers(c.tTypeId match {
+        case TTypeId.DECIMAL_TYPE =>
           Map(
             TCLIServiceConstants.PRECISION -> TTypeQualifierValue.i32Value(c.precision),
             TCLIServiceConstants.SCALE -> TTypeQualifierValue.i32Value(c.scale)).asJava
-        } else {
-          Collections.emptyMap[String, TTypeQualifierValue]()
-        })
+        case TTypeId.TIMESTAMP_TYPE =>
+          // the Arrow client needs the zone to rebuild a timestamp column; rows ignore it
+          Map(AdbcArrowTypes.TimeZoneQualifier ->
+            TTypeQualifierValue.stringValue(AdbcArrowTypes.TimestampZone)).asJava
+        case _ => Collections.emptyMap[String, TTypeQualifierValue]()
+      })
       typeEntry.setTypeQualifiers(qualifiers)
       val tTypeDesc = new TTypeDesc()
       tTypeDesc.addToTypes(TTypeEntry.primitiveEntry(typeEntry))

@@ -19,7 +19,7 @@ package org.apache.kyuubi.engine.adbc.operation
 import java.util
 
 import org.apache.kyuubi.KyuubiSQLException
-import org.apache.kyuubi.config.KyuubiConf.ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT
+import org.apache.kyuubi.config.KyuubiConf.{ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING, ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT, OPERATION_RESULT_FORMAT}
 import org.apache.kyuubi.engine.adbc.session.AdbcSessionImpl
 import org.apache.kyuubi.operation.{Operation, OperationManager}
 import org.apache.kyuubi.session.Session
@@ -41,8 +41,22 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
       .get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT.key)
       .map(_.toBoolean)
       .getOrElse(sessionConf.get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT))
-    addOperation(
-      new ExecuteStatement(session, statement, runAsync, queryTimeout, incrementalCollect))
+    // Same keys as the Spark engine: the format comes from the session conf (a statement-level
+    // overlay wins), and the client is told which decoder to use in the result set metadata.
+    val useArrow = confOverlay.get(OPERATION_RESULT_FORMAT.key)
+      .getOrElse(sessionConf.get(OPERATION_RESULT_FORMAT))
+      .equalsIgnoreCase("arrow")
+    val timestampAsString = confOverlay.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING.key)
+      .map(_.toBoolean)
+      .getOrElse(sessionConf.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING))
+    addOperation(new ExecuteStatement(
+      session,
+      statement,
+      runAsync,
+      queryTimeout,
+      incrementalCollect,
+      useArrow,
+      timestampAsString))
   }
 
   private def notSupported(what: String): Nothing =

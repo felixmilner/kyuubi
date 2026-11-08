@@ -23,11 +23,13 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 import org.apache.arrow.adbc.core.{AdbcException, AdbcStatement, AdbcStatusCode}
+import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
 
 import org.apache.kyuubi.{KyuubiSQLException, Logging}
-import org.apache.kyuubi.engine.adbc.schema.{AdbcColumn, AdbcSchema}
+import org.apache.kyuubi.engine.adbc.operation.ExecuteStatement.ArrowMaxRowsPerBatch
+import org.apache.kyuubi.engine.adbc.schema.{AdbcArrowEncoder, AdbcColumn, AdbcSchema}
 import org.apache.kyuubi.engine.adbc.session.AdbcSessionImpl
 import org.apache.kyuubi.operation.{ArrayFetchIterator, FetchOrientation, IterableFetchIterator, OperationState}
 import org.apache.kyuubi.operation.FetchOrientation.FetchOrientation
@@ -40,14 +42,23 @@ class ExecuteStatement(
     override val statement: String,
     override val shouldRunAsync: Boolean,
     queryTimeout: Long,
-    incrementalCollect: Boolean)
+    incrementalCollect: Boolean,
+    useArrow: Boolean = false,
+    arrowTimestampAsString: Boolean = false)
   extends AdbcOperation(session) with Logging {
+
+  override protected def arrowFormat: Boolean = useArrow
+  override protected def timestampAsString: Boolean = arrowTimestampAsString
 
   private val operationLog: OperationLog = OperationLog.createOperationLog(session, getHandle)
   override def getOperationLog: Option[OperationLog] = Option(operationLog)
 
   @volatile private var adbcStatement: AdbcStatement = _
   @volatile private var queryResult: AdbcStatement.QueryResult = _
+  // Arrow format only: the converted batches are made inside the native section from the driver's
+  // vectors, with an allocator of its own that is released together with the result.
+  @volatile private var encoder: AdbcArrowEncoder = _
+  @volatile private var encoderAllocator: BufferAllocator = _
   // set once the operation is cancelled, timed out or closed
   @volatile private var abandoned = false
 
@@ -116,7 +127,31 @@ class ExecuteStatement(
         val reader = result.getReader
         val root = reader.getVectorSchemaRoot
         schema = AdbcSchema.columns(root.getSchema)
-        if (incrementalCollect) {
+        if (useArrow) {
+          native {
+            if (!abandoned) {
+              encoderAllocator = adbcSession.bufferAllocator
+                .newChildAllocator(s"arrow-result-$statementId", 0, Long.MaxValue)
+              encoder = new AdbcArrowEncoder(
+                schema,
+                root.getSchema,
+                arrowTimestampAsString,
+                encoderAllocator,
+                ArrowMaxRowsPerBatch)
+            }
+          }
+          val batches = convertedBatches(reader, root)(r => encoder.encode(r))
+          if (incrementalCollect) {
+            info("Execute in incremental collect mode, Arrow format")
+            arrowIter = new IterableFetchIterator(new Iterable[Array[Byte]] {
+              override def iterator: Iterator[Array[Byte]] = batches
+            })
+          } else {
+            val all = ArrayBuffer.empty[Array[Byte]]
+            batches.foreach(all += _)
+            arrowIter = new ArrayFetchIterator(all.toArray)
+          }
+        } else if (incrementalCollect) {
           info("Execute in incremental collect mode")
           val rows = rowIterator(reader, root, schema)
           iter = new IterableFetchIterator(new Iterable[Seq[Any]] {
@@ -140,7 +175,14 @@ class ExecuteStatement(
     }
   }
 
-  /** Rows of every batch the reader produces; values are copied out of the reused vectors. */
+  /**
+   * Rows of every batch the reader produces; values are copied out of the reused vectors.
+   *
+   * Everything that touches the driver's vectors (loading a batch and reading a row) happens inside
+   * the native section, and `abandoned` is checked there: cancel() can close the result as soon as
+   * no thread is in a native section, so a check made before taking the lock proves nothing, and
+   * the vectors are freed memory once the result is closed.
+   */
   private def rowIterator(
       reader: ArrowReader,
       root: VectorSchemaRoot,
@@ -152,15 +194,15 @@ class ExecuteStatement(
 
     private def advance(): Unit = {
       while (!finished && index >= rowCount) {
-        // the reader may have been closed by cancel()/close(); never touch it then
-        if (abandoned) {
-          finished = true
-        } else if (native(reader.loadNextBatch())) {
-          rowCount = root.getRowCount
-          index = 0
-        } else {
-          finished = true
+        val loaded = native {
+          if (abandoned) false
+          else if (reader.loadNextBatch()) {
+            rowCount = root.getRowCount
+            index = 0
+            true
+          } else false
         }
+        if (!loaded) finished = true
       }
     }
 
@@ -173,7 +215,44 @@ class ExecuteStatement(
       if (!hasNext) throw new NoSuchElementException("no more rows")
       val i = index
       index += 1
-      columns.zipWithIndex.map { case (c, j) => c.read(vectors.get(j), i) }
+      native {
+        if (abandoned) throw KyuubiSQLException("The operation was cancelled or closed")
+        columns.zipWithIndex.map { case (c, j) => c.read(vectors.get(j), i) }
+      }
+    }
+  }
+
+  /**
+   * Batches the reader produces, converted by `convert` inside the native section (the conversion
+   * copies, so the result holds no driver memory).
+   */
+  private def convertedBatches[T](reader: ArrowReader, root: VectorSchemaRoot)(
+      convert: VectorSchemaRoot => Seq[T]): Iterator[T] = new Iterator[T] {
+    private var pending: Iterator[T] = Iterator.empty
+    private var finished = false
+
+    private def advance(): Unit = {
+      while (!finished && !pending.hasNext) {
+        val next = native {
+          if (abandoned) None
+          else if (reader.loadNextBatch()) Some(convert(root))
+          else None
+        }
+        next match {
+          case Some(batches) => pending = batches.iterator
+          case None => finished = true
+        }
+      }
+    }
+
+    override def hasNext: Boolean = {
+      advance()
+      !finished
+    }
+
+    override def next(): T = {
+      if (!hasNext) throw new NoSuchElementException("no more batches")
+      pending.next()
     }
   }
 
@@ -207,9 +286,16 @@ class ExecuteStatement(
   private def closeResources(): Unit = {
     val result = queryResult
     val stmt = adbcStatement
+    val enc = encoder
+    val encAllocator = encoderAllocator
     queryResult = null
     adbcStatement = null
+    encoder = null
+    encoderAllocator = null
+    // the encoder's buffers are the engine's own, released before the driver's result
     Seq[() => Unit](
+      () => if (enc != null) enc.close(),
+      () => if (encAllocator != null) encAllocator.close(),
       () => if (result != null) result.close(),
       () => if (stmt != null) stmt.close()).foreach { close =>
       try close()
@@ -237,4 +323,11 @@ class ExecuteStatement(
       closeIfIdle()
     }
   }
+}
+
+object ExecuteStatement {
+  // Upper bound of rows in one Arrow batch (one Thrift fetch). DuckDB's batches can be far larger;
+  // the encoder slices them. A row-count cap does not bound the bytes of wide or string-heavy rows:
+  // see the M2 notes in DESIGN.md.
+  val ArrowMaxRowsPerBatch = 8192
 }
