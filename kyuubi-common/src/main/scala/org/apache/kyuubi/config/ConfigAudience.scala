@@ -22,9 +22,9 @@ import org.apache.kyuubi.engine.EngineType
 object ConfigAudience extends Enumeration {
   type ConfigAudience = Value
 
-  val SERVER, SPARK, FLINK, HIVE, TRINO, JDBC, DATA_AGENT, ALL_ENGINES, ANY = Value
+  val SERVER, SPARK, FLINK, HIVE, TRINO, JDBC, DATA_AGENT, ADBC, ALL_ENGINES, ANY = Value
 
-  private val ENGINE_VALUES: Set[Value] = Set(SPARK, FLINK, HIVE, TRINO, JDBC, DATA_AGENT)
+  private val ENGINE_VALUES: Set[Value] = Set(SPARK, FLINK, HIVE, TRINO, JDBC, DATA_AGENT, ADBC)
 
   def fromEngineType(engineType: EngineType.EngineType): ConfigAudience = engineType match {
     case EngineType.SPARK_SQL => SPARK
@@ -33,6 +33,7 @@ object ConfigAudience extends Enumeration {
     case EngineType.TRINO => TRINO
     case EngineType.JDBC => JDBC
     case EngineType.DATA_AGENT => DATA_AGENT
+    case EngineType.ADBC => ADBC
     case _ => throw new IllegalArgumentException(s"Unsupported engine type: $engineType")
   }
 
@@ -66,6 +67,9 @@ object ConfigAudience extends Enumeration {
     } else if (key.startsWith("kyuubi.engine.data.agent.") ||
       key.startsWith("kyuubi.session.engine.data-agent.")) {
       Set(DATA_AGENT)
+    } else if (key.startsWith("kyuubi.engine.adbc.") ||
+      key.startsWith("kyuubi.session.engine.adbc.")) {
+      Set(ADBC)
     } else {
       Set(ANY)
     }

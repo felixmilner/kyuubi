@@ -4084,6 +4084,62 @@ object KyuubiConf {
       .stringConf
       .createOptional
 
+  val ENGINE_ADBC_DRIVER: OptionalConfigEntry[String] =
+    buildConf("kyuubi.engine.adbc.driver")
+      .doc("The ADBC driver the engine loads, by driver manifest name (for example `duckdb`, " +
+        "`datafusion`, `quack`) as installed by `dbc`, or by a path to a driver library. " +
+        "Manifests are found through the ADBC_DRIVER_PATH environment variable of the engine.")
+      .version("1.12.0")
+      .stringConf
+      .createOptional
+
+  val ENGINE_ADBC_URI: OptionalConfigEntry[String] =
+    buildConf("kyuubi.engine.adbc.uri")
+      .doc("The `uri` database option passed to the ADBC driver, if the driver takes one. " +
+        "Further driver options are set with keys prefixed `kyuubi.engine.adbc.option.`, " +
+        "for example `kyuubi.engine.adbc.option.path`.")
+      .version("1.12.0")
+      .stringConf
+      .createOptional
+
+  val ENGINE_ADBC_INITIALIZE_SQL: ConfigEntry[Seq[String]] =
+    buildConf("kyuubi.engine.adbc.initialize.sql")
+      .doc("SemiColon-separated list of SQL statements run on the session connection when an " +
+        "ADBC session opens, for example to load extensions or attach a catalog.")
+      .version("1.12.0")
+      .stringConf
+      .toSequence(";")
+      .createWithDefault(Nil)
+
+  val ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT: ConfigEntry[Boolean] =
+    buildConf("kyuubi.engine.adbc.operation.incremental.collect")
+      .doc("When true, the result is read from the ADBC driver one Arrow batch at a time as " +
+        "the client fetches it, instead of being collected in the engine first. It falls back " +
+        "to `kyuubi.operation.incremental.collect`")
+      .version("1.12.0")
+      .fallbackConf(OPERATION_INCREMENTAL_COLLECT)
+
+  val ENGINE_ADBC_MEMORY: ConfigEntry[String] =
+    buildConf("kyuubi.engine.adbc.memory")
+      .doc("The heap memory for the ADBC query engine. Native driver memory is outside the heap.")
+      .version("1.12.0")
+      .stringConf
+      .createWithDefault("1g")
+
+  val ENGINE_ADBC_JAVA_OPTIONS: OptionalConfigEntry[String] =
+    buildConf("kyuubi.engine.adbc.java.options")
+      .doc("The extra Java options for the ADBC query engine")
+      .version("1.12.0")
+      .stringConf
+      .createOptional
+
+  val ENGINE_ADBC_EXTRA_CLASSPATH: OptionalConfigEntry[String] =
+    buildConf("kyuubi.engine.adbc.extra.classpath")
+      .doc("The extra classpath for the ADBC query engine")
+      .version("1.12.0")
+      .stringConf
+      .createOptional
+
   val ENGINE_SPARK_EVENT_LOGGERS: ConfigEntry[Seq[String]] =
     buildConf("kyuubi.engine.spark.event.loggers")
       .doc("A comma-separated list of engine loggers, where engine/session/operation etc" +

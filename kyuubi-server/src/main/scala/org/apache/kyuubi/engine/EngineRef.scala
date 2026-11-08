@@ -34,6 +34,7 @@ import org.apache.kyuubi.config.KyuubiConf._
 import org.apache.kyuubi.config.KyuubiReservedKeys.KYUUBI_ENGINE_SUBMIT_TIME_KEY
 import org.apache.kyuubi.engine.EngineType._
 import org.apache.kyuubi.engine.ShareLevel.{CONNECTION, GROUP, SERVER, SERVER_LOCAL, ShareLevel}
+import org.apache.kyuubi.engine.adbc.AdbcProcessBuilder
 import org.apache.kyuubi.engine.dataagent.DataAgentProcessBuilder
 import org.apache.kyuubi.engine.flink.FlinkProcessBuilder
 import org.apache.kyuubi.engine.hive.HiveProcessBuilder
@@ -259,6 +260,8 @@ private[kyuubi] class EngineRef(
           engineRefId,
           extraEngineLog,
           defaultEngineName)
+      case ADBC =>
+        new AdbcProcessBuilder(appUser, doAsEnabled, conf, engineRefId, extraEngineLog)
       case DATA_AGENT =>
         if (conf.get(ENGINE_DATA_AGENT_JDBC_URL).isEmpty) {
           val jdbcUrl = EngineRef.deriveDataAgentJdbcUrl(conf, serverSpace)
