@@ -17,6 +17,7 @@
 package org.apache.kyuubi.engine.adbc.operation
 
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
@@ -47,9 +48,29 @@ class ExecuteStatement(
 
   @volatile private var adbcStatement: AdbcStatement = _
   @volatile private var queryResult: AdbcStatement.QueryResult = _
-  // set once the operation is cancelled, timed out or closed; an executeQuery() that is still
-  // running in a driver without cancel() releases its result when it returns
+  // set once the operation is cancelled, timed out or closed
   @volatile private var abandoned = false
+
+  // Held while any thread is inside the driver's executeQuery() or reader (loadNextBatch()), and
+  // while the result and statement are closed. Closing them natively while another thread is still
+  // reading aborts the process (found in M1: DuckDB, "Attempted to dereference shared_ptr that is
+  // NULL"), so cancel() only asks the driver to stop (stmt.cancel() is made without this lock) and
+  // the reading thread closes the resources once its read has returned.
+  private val nativeLock = new ReentrantLock()
+
+  private def native[T](body: => T): T = {
+    nativeLock.lock()
+    try body
+    finally nativeLock.unlock()
+  }
+
+  /** Closes the result and statement now if no thread is reading; otherwise the reader does it. */
+  private def closeIfIdle(): Unit = {
+    if (nativeLock.tryLock()) {
+      try closeResources()
+      finally nativeLock.unlock()
+    }
+  }
 
   override protected def runInternal(): Unit = {
     addTimeoutMonitor(queryTimeout)
@@ -80,15 +101,15 @@ class ExecuteStatement(
     setState(OperationState.RUNNING)
     try {
       val connection = session.asInstanceOf[AdbcSessionImpl].queryConnection
-      val stmt = connection.createStatement()
-      adbcStatement = stmt
-      stmt.setSqlQuery(statement)
-      val result = stmt.executeQuery()
-      queryResult = result
-      if (abandoned) {
-        // cancelled, timed out or closed while the driver was still executing
-        closeResources()
-      } else {
+      val result = native {
+        val stmt = connection.createStatement()
+        adbcStatement = stmt
+        stmt.setSqlQuery(statement)
+        val r = stmt.executeQuery()
+        queryResult = r
+        r
+      }
+      if (!abandoned) {
         val reader = result.getReader
         val root = reader.getVectorSchemaRoot
         schema = AdbcSchema.columns(root.getSchema)
@@ -102,13 +123,16 @@ class ExecuteStatement(
           val all = ArrayBuffer.empty[Seq[Any]]
           rowIterator(reader, root, schema).foreach(all += _)
           iter = new ArrayFetchIterator(all.toArray)
-          closeResources()
         }
-        setState(OperationState.FINISHED)
+        if (!abandoned) setState(OperationState.FINISHED)
       }
     } catch {
       onError(true)
     } finally {
+      // The result stays open only for an incremental fetch of a finished operation; every other
+      // outcome (error, cancel, timeout, full collect) releases it here, from the reading thread.
+      val keepOpen = incrementalCollect && state == OperationState.FINISHED && !abandoned
+      if (!keepOpen) native { closeResources() }
       shutdownTimeoutMonitor()
     }
   }
@@ -125,7 +149,10 @@ class ExecuteStatement(
 
     private def advance(): Unit = {
       while (!finished && index >= rowCount) {
-        if (reader.loadNextBatch()) {
+        // the reader may have been closed by cancel()/close(); never touch it then
+        if (abandoned) {
+          finished = true
+        } else if (native(reader.loadNextBatch())) {
           rowCount = root.getRowCount
           index = 0
         } else {
@@ -192,7 +219,8 @@ class ExecuteStatement(
       setState(OperationState.CANCELED)
       abandoned = true
       cancelDriver()
-      if (queryResult != null) closeResources()
+      // if a thread is reading, it closes the result when the interrupted read returns
+      closeIfIdle()
     }
   }
 
@@ -201,9 +229,9 @@ class ExecuteStatement(
       super.cleanup(targetState)
     } finally {
       abandoned = true
-      if (targetState == OperationState.CANCELED) cancelDriver()
-      // while executeQuery() is still running the statement is released by the executing thread
-      if (queryResult != null) closeResources()
+      // CANCELED, TIMEOUT and CLOSED can all arrive while a query is still running
+      cancelDriver()
+      closeIfIdle()
     }
   }
 }

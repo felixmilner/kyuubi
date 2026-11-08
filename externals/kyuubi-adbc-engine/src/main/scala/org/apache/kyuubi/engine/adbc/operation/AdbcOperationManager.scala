@@ -20,6 +20,7 @@ import java.util
 
 import org.apache.kyuubi.KyuubiSQLException
 import org.apache.kyuubi.config.KyuubiConf.ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT
+import org.apache.kyuubi.engine.adbc.session.AdbcSessionImpl
 import org.apache.kyuubi.operation.{Operation, OperationManager}
 import org.apache.kyuubi.session.Session
 
@@ -35,11 +36,11 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
       confOverlay: Map[String, String],
       runAsync: Boolean,
       queryTimeout: Long): Operation = {
-    val engineConf = session.sessionManager.getConf
+    val sessionConf = session.asInstanceOf[AdbcSessionImpl].sessionConf
     val incrementalCollect = confOverlay
       .get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT.key)
       .map(_.toBoolean)
-      .getOrElse(engineConf.get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT))
+      .getOrElse(sessionConf.get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT))
     addOperation(
       new ExecuteStatement(session, statement, runAsync, queryTimeout, incrementalCollect))
   }

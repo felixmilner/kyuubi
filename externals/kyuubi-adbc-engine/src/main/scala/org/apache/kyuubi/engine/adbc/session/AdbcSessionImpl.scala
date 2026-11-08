@@ -49,6 +49,16 @@ class AdbcSessionImpl(
   /** Driver, URI, driver options and init SQL come from the engine's launch conf, not the client's. */
   val engineConf: KyuubiConf = sessionManager.getConf
 
+  /**
+   * The engine conf with the client's session conf on top, for per-session behaviour settings such
+   * as incremental collect. Never used for the driver, its options or the init SQL.
+   */
+  val sessionConf: KyuubiConf = {
+    val c = engineConf.clone
+    conf.foreach { case (k, v) => c.set(k, v) }
+    c
+  }
+
   private var allocator: BufferAllocator = _
   private var database: AdbcDatabase = _
   @volatile private[adbc] var queryConnection: AdbcConnection = _

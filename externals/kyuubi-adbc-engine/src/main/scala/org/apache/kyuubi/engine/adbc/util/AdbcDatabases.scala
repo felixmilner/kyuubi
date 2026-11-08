@@ -57,10 +57,39 @@ object AdbcDatabases extends Logging {
     builder.open()
   }
 
-  /** Runs each statement on the connection and drains its result. */
+  private val ENV_PLACEHOLDER = """\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}""".r
+
+  /**
+   * Fills `${env:NAME}` placeholders from the engine's environment, so initialization SQL (for
+   * example `CREATE SECRET`) can use a credential the server passed to the engine as an environment
+   * variable without it appearing in the configuration, the command line or the logs. Returns the
+   * expanded SQL and the values that were substituted.
+   */
+  private[util] def expandEnv(
+      sql: String,
+      env: String => Option[String] = n => Option(System.getenv(n))): (String, Seq[String]) = {
+    val values = scala.collection.mutable.ArrayBuffer.empty[String]
+    val expanded = ENV_PLACEHOLDER.replaceAllIn(
+      sql,
+      m => {
+        val value = env(m.group(1)).getOrElse(
+          throw KyuubiSQLException(
+            s"Environment variable ${m.group(1)} used in the initialization sql is not set"))
+        values += value
+        scala.util.matching.Regex.quoteReplacement(value)
+      })
+    (expanded, values.toSeq)
+  }
+
+  /**
+   * Runs each statement on the connection and drains its result. `${env:NAME}` placeholders are
+   * expanded just before execution; only the unexpanded statement is logged or reported, and any
+   * expanded value is removed from error messages (drivers often quote the failing SQL).
+   */
   def runStatements(connection: AdbcConnection, statements: Seq[String]): Unit = {
-    statements.map(_.trim).filter(_.nonEmpty).foreach { sql =>
-      debug(s"Execute initialization sql: $sql")
+    statements.map(_.trim).filter(_.nonEmpty).foreach { template =>
+      debug(s"Execute initialization sql: $template")
+      val (sql, secrets) = expandEnv(template)
       val stmt = connection.createStatement()
       try {
         stmt.setSqlQuery(sql)
@@ -71,6 +100,13 @@ object AdbcDatabases extends Logging {
         } finally {
           result.close()
         }
+      } catch {
+        case NonFatal(e) if secrets.nonEmpty =>
+          // no cause: its message and stack trace would carry the expanded statement
+          val redacted = secrets.filter(_.nonEmpty).foldLeft(String.valueOf(e.getMessage)) {
+            (msg, secret) => msg.replace(secret, "<redacted>")
+          }
+          throw KyuubiSQLException(s"Initialization sql failed: $template: $redacted")
       } finally {
         stmt.close()
       }
