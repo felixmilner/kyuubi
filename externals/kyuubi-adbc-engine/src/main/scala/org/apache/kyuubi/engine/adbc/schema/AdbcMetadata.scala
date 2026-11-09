@@ -208,7 +208,8 @@ object AdbcObjects {
       int(c.get("ordinal_position")),
       text(c.get("remarks")),
       text(c.get("xdbc_type_name")),
-      int(c.get("xdbc_data_type")),
+      // DuckDB fills xdbc_sql_data_type (the JDBC type code) and leaves xdbc_data_type empty
+      int(c.get("xdbc_data_type")).orElse(int(c.get("xdbc_sql_data_type"))),
       int(c.get("xdbc_column_size")),
       int(c.get("xdbc_decimal_digits")),
       int(c.get("xdbc_num_prec_radix")),
@@ -417,8 +418,10 @@ object AdbcMetadataQueries {
       index: Int): Seq[Any] = {
     val advertised = field.map { case (f, _) => AdbcSchema.column(f) }
     val jdbc = advertised.map(JdbcTypes.of)
+    // The driver's own nullability first: DuckDB's getTableSchema (a `SELECT * ... LIMIT 0` schema)
+    // marks every field nullable, but getObjects knows about NOT NULL.
     val nullable: Option[Boolean] =
-      field.map(_._1.isNullable).orElse(col.nullable.collect { case 0 => false; case 1 => true })
+      col.nullable.collect { case 0 => false; case 1 => true }.orElse(field.map(_._1.isNullable))
     val ordinal = col.ordinal.orElse(field.map(_._2 + 1)).getOrElse(index + 1)
     def boxed(v: Option[Int]): Any = v.map(Int.box).orNull
     Seq(

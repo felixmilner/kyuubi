@@ -19,7 +19,7 @@ package org.apache.kyuubi.engine.adbc.operation
 import java.util
 
 import org.apache.kyuubi.KyuubiSQLException
-import org.apache.kyuubi.config.KyuubiConf.{ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING, ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT, OPERATION_RESULT_FORMAT}
+import org.apache.kyuubi.config.KyuubiConf.{ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING, ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT, ENGINE_OPERATION_CONVERT_CATALOG_DATABASE_ENABLED, OPERATION_RESULT_FORMAT}
 import org.apache.kyuubi.engine.adbc.session.AdbcSessionImpl
 import org.apache.kyuubi.operation.{Operation, OperationManager}
 import org.apache.kyuubi.session.Session
@@ -38,26 +38,40 @@ class AdbcOperationManager extends OperationManager("AdbcOperationManager") {
       runAsync: Boolean,
       queryTimeout: Long): Operation = {
     val sessionConf = session.asInstanceOf[AdbcSessionImpl].sessionConf
-    val incrementalCollect = confOverlay
-      .get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT.key)
-      .map(_.toBoolean)
-      .getOrElse(sessionConf.get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT))
-    // Same keys as the Spark engine: the format comes from the session conf (a statement-level
-    // overlay wins), and the client is told which decoder to use in the result set metadata.
-    val useArrow = confOverlay.get(OPERATION_RESULT_FORMAT.key)
-      .getOrElse(sessionConf.get(OPERATION_RESULT_FORMAT))
-      .equalsIgnoreCase("arrow")
-    val timestampAsString = confOverlay.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING.key)
-      .map(_.toBoolean)
-      .getOrElse(sessionConf.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING))
-    addOperation(new ExecuteStatement(
-      session,
-      statement,
-      runAsync,
-      queryTimeout,
-      incrementalCollect,
-      useArrow,
-      timestampAsString))
+    // The client's getCatalog/setCatalog/getSchema/setSchema arrive as statements with reserved
+    // markers (`_GET_CATALOG`, `use <db>`, `select current_database()`); route them to the
+    // current catalog/schema operations instead of running them as SQL, as the other engines do.
+    // `select current_database()` would give a DuckDB catalog name where the client wants a schema.
+    val catalogDatabaseOperation =
+      if (sessionConf.get(ENGINE_OPERATION_CONVERT_CATALOG_DATABASE_ENABLED)) {
+        processCatalogDatabase(session, statement, confOverlay)
+      } else {
+        null
+      }
+    if (catalogDatabaseOperation != null) {
+      catalogDatabaseOperation
+    } else {
+      val incrementalCollect = confOverlay
+        .get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT.key)
+        .map(_.toBoolean)
+        .getOrElse(sessionConf.get(ENGINE_ADBC_OPERATION_INCREMENTAL_COLLECT))
+      // Same keys as the Spark engine: the format comes from the session conf (a statement-level
+      // overlay wins), and the client is told which decoder to use in the result set metadata.
+      val useArrow = confOverlay.get(OPERATION_RESULT_FORMAT.key)
+        .getOrElse(sessionConf.get(OPERATION_RESULT_FORMAT))
+        .equalsIgnoreCase("arrow")
+      val timestampAsString = confOverlay.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING.key)
+        .map(_.toBoolean)
+        .getOrElse(sessionConf.get(ARROW_BASED_ROWSET_TIMESTAMP_AS_STRING))
+      addOperation(new ExecuteStatement(
+        session,
+        statement,
+        runAsync,
+        queryTimeout,
+        incrementalCollect,
+        useArrow,
+        timestampAsString))
+    }
   }
 
   private def notSupported(what: String): Nothing =

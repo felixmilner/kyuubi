@@ -170,7 +170,7 @@ class AdbcMetadataSuite extends KyuubiFunSuite {
       c.varChar("column_name").writeVarChar(new Text("a"))
       c.integer("ordinal_position").writeInt(1)
       c.varChar("xdbc_type_name").writeVarChar(new Text("INTEGER"))
-      c.smallInt("xdbc_data_type").writeSmallInt(4.toShort)
+      c.smallInt("xdbc_sql_data_type").writeSmallInt(4.toShort) // as DuckDB sends it
       c.end()
       cols.endList()
       t.end()
@@ -286,6 +286,18 @@ class AdbcMetadataSuite extends KyuubiFunSuite {
     assert(at(rows(2), "DATA_TYPE") === Types.VARCHAR)
     assert(at(rows(3), "DATA_TYPE") === Types.VARCHAR)
     assert(at(id, "BUFFER_LENGTH") == null && at(id, "SOURCE_DATA_TYPE") == null)
+  }
+
+  test("the driver's nullability wins over the Arrow schema's (getTableSchema marks all nullable)") {
+    val strict = column("id", 1).copy(nullable = Some(0))
+    val loose = column("note", 2).copy(nullable = Some(1))
+    val catalogs = Seq(ObjectCatalog(Some("c"), Seq(ObjectSchema(Some("s"), Seq(
+      ObjectTable("t", Some("TABLE"), Seq(strict, loose)))))))
+    val tableSchema = schemaOf(field("id", int32), field("note", ArrowType.Utf8.INSTANCE))
+    val rows = AdbcMetadataQueries.columns(new FakeSource(catalogs, Map("t" -> tableSchema)),
+      null, null, null, null)
+    assert(Seq("NULLABLE", "IS_NULLABLE").map(columnValue(rows(0), _)) === Seq(0, "NO"))
+    assert(Seq("NULLABLE", "IS_NULLABLE").map(columnValue(rows(1), _)) === Seq(1, "YES"))
   }
 
   test("the JDBC type of a column is derived from the type the engine advertises") {
