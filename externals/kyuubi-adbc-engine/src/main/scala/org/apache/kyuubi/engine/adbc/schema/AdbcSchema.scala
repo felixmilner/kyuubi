@@ -21,7 +21,7 @@ import java.util.{ArrayList => JArrayList, Collections}
 
 import scala.collection.JavaConverters._
 
-import org.apache.arrow.vector.{BaseIntVector, FieldVector}
+import org.apache.arrow.vector.{BaseIntVector, BitVector, FieldVector, Float4Vector, Float8Vector}
 import org.apache.arrow.vector.dictionary.DictionaryProvider
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, Schema}
@@ -84,7 +84,11 @@ object AdbcSchema {
       })
     } else field.getType match {
       case _: ArrowType.Bool =>
-        col(TTypeId.BOOLEAN_TYPE, nullSafe((v, i) => java.lang.Boolean.valueOf(v.getObject(i).toString.toBoolean)))
+        // read the vector directly: this runs once per cell, and the text round trip it replaces
+        // (found by the M2(d) benchmark) boxed, formatted and parsed every value
+        col(
+          TTypeId.BOOLEAN_TYPE,
+          nullSafe((v, i) => java.lang.Boolean.valueOf(v.asInstanceOf[BitVector].get(i) == 1)))
       case t: ArrowType.Int =>
         def long(v: FieldVector, i: Int): Long = v.asInstanceOf[BaseIntVector].getValueAsLong(i)
         (t.getBitWidth, t.getIsSigned) match {
@@ -100,9 +104,13 @@ object AdbcSchema {
       case t: ArrowType.FloatingPoint =>
         t.getPrecision match {
           case FloatingPointPrecision.SINGLE =>
-            col(TTypeId.FLOAT_TYPE, nullSafe((v, i) => java.lang.Float.valueOf(v.getObject(i).toString)))
+            col(
+              TTypeId.FLOAT_TYPE,
+              nullSafe((v, i) => java.lang.Float.valueOf(v.asInstanceOf[Float4Vector].get(i))))
           case FloatingPointPrecision.DOUBLE =>
-            col(TTypeId.DOUBLE_TYPE, nullSafe((v, i) => java.lang.Double.valueOf(v.getObject(i).toString)))
+            col(
+              TTypeId.DOUBLE_TYPE,
+              nullSafe((v, i) => java.lang.Double.valueOf(v.asInstanceOf[Float8Vector].get(i))))
           case _ => col(TTypeId.STRING_TYPE, asText)
         }
       case _: ArrowType.Utf8 | _: ArrowType.LargeUtf8 | _: ArrowType.Utf8View =>
